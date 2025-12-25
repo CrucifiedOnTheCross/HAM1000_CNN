@@ -1,0 +1,35 @@
+# --- Data & Experiments ---
+data/
+experiments/
+logs/
+tensorboard_logs/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.class
+*.so
+.env
+.venv
+env/
+venv/
+*.egg-info/
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+*-checkpoint.ipynb
+
+# --- TensorFlow / Models ---
+*.h5
+*.hdf5
+*.ckpt
+*.pb
+
+# --- IDEs ---
+.vscode/
+.idea/
+*.swp
+
+# --- OS ---
+.DS_Store
+Thumbs.db
