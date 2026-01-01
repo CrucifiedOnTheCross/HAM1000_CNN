@@ -6,6 +6,7 @@ import tensorflow as tf
 from sklearn.model_selection import train_test_split
 from typing import Tuple, List, Optional
 from glob import glob
+from tqdm import tqdm # Для прогресс-бара загрузки
 
 # Настройка логирования
 logging.basicConfig(
@@ -25,7 +26,7 @@ class DataManager:
         """
         Инициализация менеджера данных.
         
-        :param data_dir: Путь к корневой директории с данными (где лежат изображения и CSV).
+        :param data_dir: Путь к корневой директории с данными.
         :param csv_filename: Имя файла метаданных.
         """
         self.data_dir = data_dir
@@ -33,7 +34,7 @@ class DataManager:
         self.df: Optional[pd.DataFrame] = None
         self.image_paths_map: dict = {}
         
-        # Словарь маппинга классов (согласно методологии)
+        # Словарь маппинга классов
         self.class_map = {
             'nv': 0,    # Melanocytic nevi
             'mel': 1,   # Melanoma
@@ -47,8 +48,6 @@ class DataManager:
 
     def _load_image_paths(self) -> None:
         """Сканирует директорию данных для создания карты {image_id: full_path}."""
-        # Ищем все jpg файлы рекурсивно или в плоской структуре внутри data_dir
-        # Используем glob для поиска во всех подпапках
         search_pattern = os.path.join(self.data_dir, "**", "*.jpg")
         image_paths = glob(search_pattern, recursive=True)
         
@@ -56,21 +55,20 @@ class DataManager:
             logger.error("Файлы изображений (.jpg) не обнаружены в указанной директории.")
             raise FileNotFoundError("Изображения отсутствуют.")
 
-        # Создаем словарь image_id -> path
-        # filename example: ISIC_0027419.jpg -> key: ISIC_0027419
         self.image_paths_map = {
             os.path.splitext(os.path.basename(path))[0]: path 
             for path in image_paths
         }
         logger.info(f"Индексация изображений завершена. Найдено файлов: {len(self.image_paths_map)}")
 
-    def prepare_data(self, test_size: float = 0.2, random_state: int = 42) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    def prepare_data(self, val_size: float = 0.15, test_size: float = 0.15, random_state: int = 42) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         """
-        Загружает CSV, добавляет полные пути и разделяет на train/test.
+        Загружает CSV и выполняет трехстороннее разделение: Train, Validation, Test.
         
-        :param test_size: Доля тестовой выборки.
+        :param val_size: Доля валидационной выборки (от общего числа).
+        :param test_size: Доля тестовой выборки (от общего числа).
         :param random_state: Сид для воспроизводимости.
-        :return: Кортеж (train_df, test_df).
+        :return: Кортеж (train_df, val_df, test_df).
         """
         if not os.path.exists(self.csv_path):
             logger.critical(f"Файл метаданных не найден: {self.csv_path}")
@@ -83,107 +81,127 @@ class DataManager:
         # 2. Добавление колонки path
         df['path'] = df['image_id'].map(self.image_paths_map)
         
-        # 3. Фильтрация потерянных изображений (если есть расхождения между CSV и файлами)
+        # 3. Фильтрация
         missing_count = df['path'].isna().sum()
         if missing_count > 0:
-            logger.warning(f"Обнаружено {missing_count} записей в CSV без соответствующих файлов изображений. Они будут исключены.")
+            logger.warning(f"Обнаружено {missing_count} записей без файлов. Они будут исключены.")
             df = df.dropna(subset=['path'])
 
-        # 4. Кодирование меток (Label Encoding)
+        # 4. Кодирование меток
         df['label_idx'] = df['dx'].map(self.class_map)
         
-        # 5. Стратифицированное разделение
-        logger.info("Выполняется стратифицированное разделение выборки...")
-        train_df, test_df = train_test_split(
+        # 5. Стратифицированное разделение на 3 части
+        logger.info("Выполняется стратифицированное разделение выборки на Train/Val/Test...")
+        
+        # Шаг 1: Отделяем Test set
+        train_val_df, test_df = train_test_split(
             df, 
             test_size=test_size, 
             random_state=random_state, 
             stratify=df['label_idx']
         )
         
-        logger.info(f"Данные подготовлены. Обучающая выборка: {len(train_df)}, Тестовая выборка: {len(test_df)}")
-        return train_df, test_df
-
+        # Шаг 2: Отделяем Validation set из оставшегося Train_Val
+        # Необходимо пересчитать долю val_size относительно оставшегося объема данных
+        relative_val_size = val_size / (1 - test_size)
+        
+        train_df, val_df = train_test_split(
+            train_val_df,
+            test_size=relative_val_size,
+            random_state=random_state,
+            stratify=train_val_df['label_idx']
+        )
+        
+        logger.info(f"Данные подготовлены.")
+        logger.info(f"Обучающая выборка (Train): {len(train_df)}")
+        logger.info(f"Валидационная выборка (Val): {len(val_df)}")
+        logger.info(f"Тестовая выборка (Test): {len(test_df)}")
+        
+        return train_df, val_df, test_df
 
 class BalancedDataGenerator(tf.keras.utils.Sequence):
-    """
-    Генератор данных, обеспечивающий сбалансированное присутствие всех классов в каждом батче.
-    Использует технику Under-sampling мажоритарных классов и Over-sampling миноритарных 
-    в рамках одного батча.
-    """
-
     def __init__(self, 
                  df: pd.DataFrame, 
                  batch_size: int = 28, 
                  input_shape: Tuple[int, int] = (224, 224),
                  shuffle: bool = True,
-                 augment: bool = False):
-        """
-        Инициализация сбалансированного генератора.
+                 augment: bool = False,
+                 cache_images: bool = True): # <--- НОВЫЙ ФЛАГ
         
-        :param df: DataFrame с колонками 'path' и 'label_idx'.
-        :param batch_size: Размер батча (должен быть кратен количеству классов, иначе округляется).
-        :param input_shape: Размер входного изображения (H, W).
-        :param augment: Флаг применения аугментации (True для train).
-        """
         self.df = df
         self.input_shape = input_shape
         self.shuffle = shuffle
         self.augment = augment
+        self.cache_images = cache_images
         self.num_classes = 7
         
-        # Проверка размера батча
+        # Корректировка размера батча
         if batch_size % self.num_classes != 0:
-            new_batch_size = (batch_size // self.num_classes) * self.num_classes
-            logger.warning(f"Размер батча {batch_size} не кратен 7. Скорректирован до {new_batch_size} для идеального баланса.")
-            self.batch_size = new_batch_size
+            self.batch_size = (batch_size // self.num_classes) * self.num_classes
         else:
             self.batch_size = batch_size
             
         self.samples_per_class = self.batch_size // self.num_classes
-        
-        # Группировка данных по классам для быстрого доступа
         self.groups = [self.df[self.df['label_idx'] == i] for i in range(self.num_classes)]
-        
-        # Расчет длины эпохи (кол-во батчей). 
-        # Т.к. мы балансируем искусственно, эпоха определяется по мажоритарному классу или произвольно.
-        # Определим эпоху как (Общее кол-во данных) / batch_size
         self.n_batches = len(self.df) // self.batch_size
         
-        logger.info(f"Инициализирован BalancedDataGenerator. Образцов на класс в батче: {self.samples_per_class}")
+        # --- КЭШИРОВАНИЕ ---
+        self.image_cache = {}
+        if self.cache_images:
+            logger.info(f"Загрузка {len(df)} изображений в RAM для ускорения...")
+            # Предзагружаем все уникальные пути
+            unique_paths = self.df['path'].unique()
+            for path in tqdm(unique_paths, desc="Caching images"):
+                self.image_cache[path] = self._load_raw_image(path)
+            logger.info(f"Загружено в память. Размер кэша: {len(self.image_cache)}")
 
     def __len__(self) -> int:
-        """Возвращает количество батчей в эпохе."""
         return self.n_batches
 
+    def _load_raw_image(self, path: str) -> np.ndarray:
+        """Просто грузит картинку, без аугментации"""
+        try:
+            img = tf.keras.utils.load_img(path, target_size=self.input_shape)
+            img_array = tf.keras.utils.img_to_array(img)
+            return img_array # Возвращаем float32 0-255
+        except Exception as e:
+            logger.error(f"Error loading {path}: {e}")
+            return np.zeros((self.input_shape[0], self.input_shape[1], 3))
+
     def __getitem__(self, index: int) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Генерирует один батч данных.
-        
-        :param index: Индекс батча (не используется напрямую для выборки при случайном сэмплировании).
-        """
         batch_x = []
         batch_y = []
 
-        # Формирование сбалансированного набора
         for class_idx in range(self.num_classes):
-            # Случайная выборка N примеров конкретного класса
-            # replace=True позволяет брать повторы, если примеров в классе (DF) меньше, чем нужно
+            # Берем случайные образцы для каждого класса
             class_samples = self.groups[class_idx].sample(n=self.samples_per_class, replace=True)
             
             for _, row in class_samples.iterrows():
-                img = self._load_and_process_image(row['path'])
-                batch_x.append(img)
+                path = row['path']
+                
+                # БЕРЕМ ИЗ КЭША ИЛИ С ДИСКА
+                if self.cache_images and path in self.image_cache:
+                    img_array = self.image_cache[path].copy() # Важно делать copy(), чтобы аугментация не портила оригинал в кэше
+                else:
+                    img_array = self._load_raw_image(path)
+                
+                # АУГМЕНТАЦИЯ (CPU-based)
+                if self.augment:
+                    img_array = tf.image.random_flip_left_right(img_array)
+                    img_array = tf.image.random_brightness(img_array, max_delta=0.1)
+                    # Можно добавить поворот на 90 градусов
+                    k = np.random.randint(4)
+                    img_array = tf.image.rot90(img_array, k=k)
+
+                batch_x.append(img_array)
                 batch_y.append(class_idx)
 
-        # Конвертация в numpy массивы
         batch_x = np.array(batch_x)
         batch_y = np.array(batch_y)
         
-        # One-hot encoding для меток
+        # One-hot encoding
         batch_y = tf.keras.utils.to_categorical(batch_y, num_classes=self.num_classes)
 
-        # Перемешивание внутри батча, чтобы классы не шли по порядку [0,0,1,1...]
         if self.shuffle:
             indices = np.arange(self.batch_size)
             np.random.shuffle(indices)
@@ -192,53 +210,10 @@ class BalancedDataGenerator(tf.keras.utils.Sequence):
 
         return batch_x, batch_y
 
-    def _load_and_process_image(self, path: str) -> np.ndarray:
-        """
-        Загрузка и препроцессинг изображения.
-        
-        :param path: Путь к файлу.
-        :return: Нормализованный массив изображения.
-        """
-        try:
-            # Загрузка через Keras utils
-            img = tf.keras.utils.load_img(path, target_size=self.input_shape)
-            img_array = tf.keras.utils.img_to_array(img)
-            
-            # Нормализация [0, 1]
-            # ResNet/EfficientNet могут требовать специфичного preprocess_input, 
-            # но для начала используем универсальный rescaling 1./255. 
-            # В файлах архитектур мы учли preprocess_input для ResNet, здесь отдаем "сырой" нормализованный
-            # Если использовать tf.keras.applications, лучше отдавать 0-255 и preprocessing слой внутри модели.
-            # Для универсальности здесь вернем 0-255 (float).
-            
-            # Примечание: В файлах моделей (resnet.py) добавлен слой preprocess_input.
-            # Поэтому здесь мы просто возвращаем массив.
-            
-            if self.augment:
-                # Здесь можно внедрить Albumentations или простые tf augmentation
-                # Для базовой версии пока оставим без аугментации (или минимальный flip)
-                img_array = tf.image.random_flip_left_right(img_array)
-                img_array = tf.image.random_brightness(img_array, max_delta=0.1)
-                
-            return img_array
-            
-        except Exception as e:
-            logger.error(f"Ошибка чтения файла {path}: {e}")
-            # Возврат черного квадрата, чтобы не уронить батч (крайний случай)
-            return np.zeros((self.input_shape[0], self.input_shape[1], 3))
-
 if __name__ == "__main__":
-    # Тест работоспособности
+    # Тест
     manager = DataManager(data_dir="./data")
     try:
-        train, test = manager.prepare_data()
-        
-        # Создаем генератор (батч 14 = по 2 примера на класс)
-        gen = BalancedDataGenerator(train, batch_size=14)
-        X, y = gen[0]
-        
-        logger.info(f"Тестовый батч сформирован. Shape X: {X.shape}, Shape y: {y.shape}")
-        logger.info(f"Пример меток (должны быть разные классы): \n{np.argmax(y, axis=1)}")
-        
+        train, val, test = manager.prepare_data()
     except Exception as e:
         logger.error(f"Тест прерван: {e}")

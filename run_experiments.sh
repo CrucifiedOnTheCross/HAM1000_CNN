@@ -1,33 +1,61 @@
 #!/bin/bash
 
-# Скрипт автоматического запуска серии экспериментов
+# Скрипт автоматического запуска серии экспериментов для диплома
 # Прерывание выполнения при ошибке любой команды
 set -e
 
 echo "========================================================"
-echo "НАЧАЛО СЕРИИ ЭКСПЕРИМЕНТОВ: КЛАССИФИКАЦИЯ HAM10000"
+echo "ЗАПУСК ЭКСПЕРИМЕНТОВ: HAM10000 (EfficientNet)"
 echo "Дата запуска: $(date)"
 echo "========================================================"
 
-# Константы для всех экспериментов
-EPOCHS=100
-BATCH_SIZE=64
-PATIENCE=8
+# --- НАСТРОЙКИ ---
+EPOCHS=50        # Количество эпох
+BATCH_SIZE=64    # Размер батча
+PATIENCE=10      # Терпение EarlyStopping
 
-# --- ЭКСПЕРИМЕНТ 1: EfficientNetB0 + CrossEntropy (Baseline) ---
+# ========================================================
+# ЭТАП 1: BASELINE (Базовый уровень)
+# Описание: Обычный дисбалансированный датасет, без аугментации.
+# Цель: Показать низкую чувствительность к редким классам и переобучение.
+# ========================================================
 echo ""
-echo "[1/4] Запуск: EfficientNetB0 + Categorical CrossEntropy"
+echo "[1/3] ЗАПУСК: 1. Baseline (Imbalanced, No Augmentation, CrossEntropy)"
 python3 train_experiment.py \
     --model efficientnet \
+    --no_balance \
+    --no_augment \
     --epochs $EPOCHS \
     --batch_size $BATCH_SIZE \
     --patience $PATIENCE
 
-echo "Статус: Эксперимент 1 завершен успешно."
+echo "СТАТУС: Этап 1 (Baseline) завершен."
 
-# --- ЭКСПЕРИМЕНТ 2: EfficientNetB0 + Focal Loss ---
+# ========================================================
+# ЭТАП 2: ВЛИЯНИЕ АУГМЕНТАЦИИ
+# Описание: Включаем повороты и яркость, но датасет всё ещё дисбалансирован.
+# Цель: Показать снижение переобучения (уменьшение разрыва train/val).
+# (Флаг --no_augment убран -> аугментация включена)
+# ========================================================
 echo ""
-echo "[2/4] Запуск: EfficientNetB0 + Focal Loss"
+echo "[2/3] ЗАПУСК: 2. With Augmentation (Imbalanced, Augmentation, CrossEntropy)"
+python3 train_experiment.py \
+    --model efficientnet \
+    --no_balance \
+    --epochs $EPOCHS \
+    --batch_size $BATCH_SIZE \
+    --patience $PATIENCE
+
+echo "СТАТУС: Этап 2 (Augmentation) завершен."
+
+# ========================================================
+# ЭТАП 3: ИТОГОВЫЙ МЕТОД (Proposed Method)
+# Описание: Подключаем балансировщик батчей и функцию потерь Focal Loss.
+# Цель: Показать максимальный прирост метрик (особенно Recall/AUC) на редких классах.
+# (Флаг --no_balance убран -> балансировка включена. Добавлен --focal)
+# ========================================================
+echo ""
+echo "[3/3] ЗАПУСК: 3. Proposed Method (Balanced, Augmentation, Focal Loss)"
 python3 train_experiment.py \
     --model efficientnet \
     --focal \
@@ -35,33 +63,10 @@ python3 train_experiment.py \
     --batch_size $BATCH_SIZE \
     --patience $PATIENCE
 
-echo "Статус: Эксперимент 2 завершен успешно."
-
-# --- ЭКСПЕРИМЕНТ 3: ResNet50 + CrossEntropy ---
-echo ""
-echo "[3/4] Запуск: ResNet50 + Categorical CrossEntropy"
-python3 train_experiment.py \
-    --model resnet \
-    --epochs $EPOCHS \
-    --batch_size $BATCH_SIZE \
-    --patience $PATIENCE
-
-echo "Статус: Эксперимент 3 завершен успешно."
-
-# --- ЭКСПЕРИМЕНТ 4: ResNet50 + Focal Loss ---
-echo ""
-echo "[4/4] Запуск: ResNet50 + Focal Loss"
-python3 train_experiment.py \
-    --model resnet \
-    --focal \
-    --epochs $EPOCHS \
-    --batch_size $BATCH_SIZE \
-    --patience $PATIENCE
-
-echo "Статус: Эксперимент 4 завершен успешно."
+echo "СТАТУС: Этап 3 (Final) завершен."
 
 echo ""
 echo "========================================================"
-echo "ВСЕ ЭКСПЕРИМЕНТЫ ВЫПОЛНЕНЫ."
-echo "Результаты сохранены в директории ./experiments/"
+echo "ВСЕ ЭКСПЕРИМЕНТЫ УСПЕШНО ВЫПОЛНЕНЫ."
+echo "Результаты сохранены в папке ./experiments/"
 echo "========================================================"

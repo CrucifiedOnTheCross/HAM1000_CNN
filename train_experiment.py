@@ -1,16 +1,20 @@
 import os
+
+# --- БЛОК ПОДАВЛЕНИЯ ПРЕДУПРЕЖДЕНИЙ ---
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' 
+
 import json
 import logging
 import warnings
 import argparse
 import datetime
 import pandas as pd
+import numpy as np
 import tensorflow as tf
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLROnPlateau, CSVLogger
 
-# --- БЛОК ПОДАВЛЕНИЯ ПРЕДУПРЕЖДЕНИЙ ---
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+# Отключение питоновских предупреждений
 warnings.filterwarnings('ignore')
 tf.get_logger().setLevel(logging.ERROR)
 
@@ -19,9 +23,9 @@ from src.data_loader import DataManager, BalancedDataGenerator
 from src.models.efficientnet import build_efficientnet_b0
 from src.models.resnet import build_resnet50
 from src.visualization import TrainingVisualizer
-from src.serializers import TFJSONEncoder  # Импорт исправления для JSON
+from src.serializers import TFJSONEncoder
 
-# Настройка основного логирования проекта
+# Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -29,173 +33,165 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-def create_validation_generator(df: pd.DataFrame, input_shape: tuple, batch_size: int, class_order: list) -> tf.keras.preprocessing.image.Iterator:
-    """
-    Создает генератор для валидационной выборки.
-    """
-    val_datagen = ImageDataGenerator()
-    generator = val_datagen.flow_from_dataframe(
-        dataframe=df,
-        x_col='path',
-        y_col='dx',
-        target_size=input_shape,
-        class_mode='categorical',
-        classes=class_order,
-        batch_size=batch_size,
-        shuffle=False  # Важно: для корректной оценки shuffle должен быть False
+def create_standard_generator(df: pd.DataFrame, input_shape: tuple, batch_size: int, class_order: list, augment: bool, is_training: bool) -> tf.keras.preprocessing.image.Iterator:
+    """Создает стандартный ImageDataGenerator."""
+    if is_training and augment:
+        datagen = ImageDataGenerator(horizontal_flip=True, brightness_range=[0.9, 1.1])
+        logger.info("Создан стандартный генератор С АУГМЕНТАЦИЕЙ.")
+    else:
+        datagen = ImageDataGenerator()
+        logger.info(f"Создан генератор ({'ВАЛИДАЦИЯ/ТЕСТ' if not is_training else 'ОБУЧЕНИЕ'}).")
+
+    return datagen.flow_from_dataframe(
+        dataframe=df, x_col='path', y_col='dx', target_size=input_shape,
+        class_mode='categorical', classes=class_order, batch_size=batch_size, shuffle=is_training
     )
-    return generator
 
 def run_experiment(args: argparse.Namespace) -> None:
-    """
-    Основная логика проведения эксперимента.
-    """
-    logger.info("Инициализация эксперимента с параметрами:")
-    logger.info(f"Архитектура: {args.model}")
-    logger.info(f"Функция потерь: {'Focal Loss' if args.focal else 'CrossEntropy'}")
-    logger.info(f"Параметр Patience: {args.patience}")
+    logger.info(f"Старт эксперимента: {args.model} | Balance={not args.no_balance} | Aug={not args.no_augment} | Focal={args.focal}")
 
-    # Проверка доступности GPU
+    # --- GPU ---
     physical_devices = tf.config.list_physical_devices('GPU')
-    if physical_devices:
-        logger.info(f"Вычисления будут выполнены на GPU: {len(physical_devices)} устройств(а).")
+    if len(physical_devices) > 1:
+        strategy = tf.distribute.MirroredStrategy()
+        logger.info(f"Используется {strategy.num_replicas_in_sync} GPU.")
     else:
-        logger.warning("GPU не обнаружен. Вычисления будут выполнены на CPU (возможна низкая производительность).")
+        strategy = tf.distribute.get_strategy()
 
-    # 1. Подготовка данных
+    # 1. Данные
     data_manager = DataManager(data_dir=args.data_dir)
-    try:
-        train_df, val_df = data_manager.prepare_data(test_size=0.2)
-    except Exception as e:
-        logger.critical(f"Ошибка подготовки данных: {e}")
-        return
-
-    # Генератор для обучения (Сбалансированный)
-    train_gen = BalancedDataGenerator(
-        train_df, 
-        batch_size=args.batch_size, 
-        input_shape=(224, 224),
-        augment=True
-    )
-
-    # Генератор для валидации
     class_order = list(data_manager.class_map.keys())
-    val_gen = create_validation_generator(val_df, (224, 224), args.batch_size, class_order)
+    try:
+        # Распаковываем 3 датафрейма
+        train_df, val_df, test_df = data_manager.prepare_data(test_size=0.2)
+    except Exception as e:
+        logger.critical(f"Ошибка данных: {e}"); return
 
-    # 2. Сборка модели
-    if args.model == 'efficientnet':
-        model = build_efficientnet_b0(num_classes=7, learning_rate=args.lr, use_focal_loss=args.focal)
-    elif args.model == 'resnet':
-        model = build_resnet50(num_classes=7, learning_rate=args.lr, use_focal_loss=args.focal)
+    input_shape = (224, 224)
+
+    # Генераторы
+    if args.no_balance:
+        train_gen = create_standard_generator(train_df, input_shape, args.batch_size, class_order, not args.no_augment, True)
     else:
-        logger.error("Указана неизвестная архитектура модели.")
-        return
+        train_gen = BalancedDataGenerator(train_df, args.batch_size, input_shape, not args.no_augment)
 
-    # 3. Настройка Callbacks
+    val_gen = create_standard_generator(val_df, input_shape, args.batch_size, class_order, False, False)
+    
+    # Генератор для ТЕСТА (создаем сразу)
+    test_gen = create_standard_generator(test_df, input_shape, args.batch_size, class_order, False, False)
+
+    # 2. Модель
+    with strategy.scope():
+        if args.model == 'efficientnet':
+            model = build_efficientnet_b0(num_classes=7, learning_rate=args.lr, use_focal_loss=args.focal)
+        elif args.model == 'resnet':
+            model = build_resnet50(num_classes=7, learning_rate=args.lr, use_focal_loss=args.focal)
+        else: return
+
+    # 3. Пути
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    experiment_name = f"{args.model}_{'focal' if args.focal else 'ce'}_{timestamp}"
-    checkpoint_dir = os.path.join("experiments", experiment_name)
-    os.makedirs(checkpoint_dir, exist_ok=True)
+    exp_name = f"{args.model}_{'imbalanced' if args.no_balance else 'balanced'}_{'noaug' if args.no_augment else 'aug'}_{'focal' if args.focal else 'ce'}_{timestamp}"
+    ckpt_dir = os.path.join("experiments", exp_name)
+    os.makedirs(ckpt_dir, exist_ok=True)
+    
+    # Сохраняем test_df для истории
+    test_df.to_csv(os.path.join(ckpt_dir, "test_dataset.csv"), index=False)
 
     callbacks = [
-        ModelCheckpoint(
-            filepath=os.path.join(checkpoint_dir, "best_model.h5"),
-            monitor='val_auc', 
-            mode='max',
-            save_best_only=True,
-            verbose=1
-        ),
-        ReduceLROnPlateau(
-            monitor='val_loss',
-            factor=0.5,
-            patience=3,
-            min_lr=1e-6,
-            verbose=1
-        ),
-        # Ранняя остановка (Early Stopping)
-        EarlyStopping(
-            monitor='val_loss',         # Отслеживаемая метрика
-            patience=args.patience,     # Количество эпох без улучшений
-            min_delta=0.001,            # Минимальное значимое изменение
-            restore_best_weights=True,  # Восстановление весов лучшей эпохи
-            verbose=1
-        ),
-        CSVLogger(
-            filename=os.path.join(checkpoint_dir, "training_log.csv"),
-            append=True
-        )
+        # save_weights_only=True обязательно для мульти-GPU
+        ModelCheckpoint(os.path.join(ckpt_dir, "best_weights.h5"), monitor='val_auc', mode='max', save_best_only=True, save_weights_only=True, verbose=1),
+        ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3, min_lr=1e-6, verbose=1),
+        EarlyStopping(monitor='val_loss', patience=args.patience, restore_best_weights=True, verbose=1),
+        CSVLogger(os.path.join(ckpt_dir, "training_log.csv"), append=True)
     ]
 
-    # 4. Запуск обучения
-    logger.info("Запуск процесса обучения...")
     try:
-        history = model.fit(
-            train_gen,
-            validation_data=val_gen,
-            epochs=args.epochs,
-            callbacks=callbacks,
-            verbose=1
-        )
-        logger.info("Обучение завершено успешно.")
+        TrainingVisualizer.plot_class_distribution(train_df, 'dx', save_path=os.path.join(ckpt_dir, "data_distribution.png"))
+    except: pass
+
+    # 4. Обучение
+    try:
+        history = model.fit(train_gen, validation_data=val_gen, epochs=args.epochs, callbacks=callbacks, verbose=1)
     except KeyboardInterrupt:
-        logger.warning("Обучение прервано пользователем.")
-        return
+        logger.warning("Обучение прервано."); return
     except Exception as e:
-        logger.critical(f"Критическая ошибка в процессе обучения: {e}")
-        return
+        logger.critical(f"Ошибка обучения: {e}"); return
 
-    # 5. Итоговая оценка на валидационном наборе (Evaluation)
-    logger.info("Выполняется итоговая оценка модели на валидационной выборке...")
-    try:
-        # evaluate возвращает список значений метрик
-        val_metrics = model.evaluate(val_gen, verbose=1, return_dict=True)
-        
-        logger.info("Получены итоговые метрики валидации:")
-        for metric, value in val_metrics.items():
-            logger.info(f" - {metric}: {value:.4f}")
-            
-        # Сохранение метрик валидации в отдельный файл
-        metrics_path = os.path.join(checkpoint_dir, "final_validation_metrics.json")
-        with open(metrics_path, 'w', encoding='utf-8') as f:
-            json.dump(val_metrics, f, cls=TFJSONEncoder, indent=4)
-            
-    except Exception as e:
-        logger.error(f"Ошибка при вычислении итоговых метрик: {e}")
-
-    # 6. Сохранение истории и графиков
-    logger.info("Генерация отчетов и графиков...")
+    # 5. Сохранение истории
+    with open(os.path.join(ckpt_dir, "history.json"), 'w') as f: json.dump(history.history, f, cls=TFJSONEncoder, indent=4)
+    TrainingVisualizer.plot_history(history.history, save_path=os.path.join(ckpt_dir, "history_plot.png"))
     
-    # Сохранение истории в JSON
-    history_path = os.path.join(checkpoint_dir, "history.json")
-    try:
-        with open(history_path, 'w', encoding='utf-8') as f:
-            json.dump(history.history, f, cls=TFJSONEncoder, indent=4)
-        logger.info("Файл истории обучения успешно сохранен.")
-    except Exception as e:
-        logger.error(f"Не удалось сохранить историю обучения в JSON: {e}")
+    # Сохранение финальных весов
+    model.save_weights(os.path.join(ckpt_dir, "final_weights.h5"))
 
-    # Построение графиков
-    try:
-        plot_path = os.path.join(checkpoint_dir, "history_plot.png")
-        TrainingVisualizer.plot_history(history.history, save_path=plot_path)
-    except Exception as e:
-        logger.error(f"Не удалось построить график истории: {e}")
+    # ==========================================
+    # 6. Оценка на VALIDATION (для контроля)
+    # ==========================================
+    logger.info("--- ОЦЕНКА НА VALIDATION SET ---")
+    val_gen.reset()
+    val_metrics = model.evaluate(val_gen, verbose=1, return_dict=True)
     
-    # Сохранение финальной модели (фактически это best_model из-за restore_best_weights)
-    final_model_path = os.path.join(checkpoint_dir, "final_model.h5")
-    model.save(final_model_path)
-    logger.info(f"Эксперимент завершен. Артефакты сохранены в: {checkpoint_dir}")
+    val_preds = model.predict(val_gen, verbose=1)
+    TrainingVisualizer.plot_confusion_matrix(val_gen.classes, np.argmax(val_preds, axis=1), class_order, os.path.join(ckpt_dir, "val_confusion_matrix.png"))
+    TrainingVisualizer.plot_roc_curves(val_gen.classes, val_preds, class_order, os.path.join(ckpt_dir, "val_roc_curves.png"))
+    
+    with open(os.path.join(ckpt_dir, "val_metrics.json"), 'w') as f: json.dump(val_metrics, f, cls=TFJSONEncoder, indent=4)
+
+    # ==========================================
+    # 7. ФИНАЛЬНАЯ ОЦЕНКА НА TEST SET (Для диплома)
+    # ==========================================
+    logger.info("--- ФИНАЛЬНАЯ ОЦЕНКА НА TEST SET ---")
+    
+    # Загружаем ЛУЧШИЕ веса перед тестом
+    logger.info("Загрузка лучших весов для тестирования...")
+    try:
+        model.load_weights(os.path.join(ckpt_dir, "best_weights.h5"))
+    except Exception as e:
+        logger.warning(f"Не удалось загрузить лучшие веса ({e}), используем текущие.")
+
+    test_gen.reset()
+    test_metrics = model.evaluate(test_gen, verbose=1, return_dict=True)
+    logger.info(f"Test Accuracy: {test_metrics.get('accuracy', 0):.4f}")
+    logger.info(f"Test AUC: {test_metrics.get('auc', 0):.4f}")
+
+    # Предсказания для графиков
+    test_preds = model.predict(test_gen, verbose=1)
+    y_test_true = test_gen.classes
+    y_test_pred = np.argmax(test_preds, axis=1)
+
+    # 1. Матрица ошибок (TEST)
+    TrainingVisualizer.plot_confusion_matrix(
+        y_true=y_test_true, 
+        y_pred=y_test_pred, 
+        classes=class_order, 
+        save_path=os.path.join(ckpt_dir, "test_confusion_matrix.png")
+    )
+
+    # 2. ROC-кривые (TEST)
+    TrainingVisualizer.plot_roc_curves(
+        y_true=y_test_true, 
+        y_pred_probs=test_preds, 
+        classes=class_order, 
+        save_path=os.path.join(ckpt_dir, "test_roc_curves.png")
+    )
+
+    # 3. Сохранение метрик (TEST)
+    with open(os.path.join(ckpt_dir, "test_metrics.json"), 'w') as f:
+        json.dump(test_metrics, f, cls=TFJSONEncoder, indent=4)
+
+    logger.info(f"Эксперимент завершен. Результаты в: {ckpt_dir}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Запуск эксперимента по классификации HAM10000")
-    
-    parser.add_argument('--data_dir', type=str, default='./data', help='Путь к данным')
-    parser.add_argument('--model', type=str, default='efficientnet', choices=['efficientnet', 'resnet'], help='Архитектура модели')
-    parser.add_argument('--epochs', type=int, default=30, help='Максимальное количество эпох')
-    parser.add_argument('--batch_size', type=int, default=28, help='Размер батча')
-    parser.add_argument('--lr', type=float, default=1e-4, help='Learning Rate')
-    parser.add_argument('--focal', action='store_true', help='Использовать Focal Loss')
-    parser.add_argument('--patience', type=int, default=8, help='Количество эпох без улучшений для остановки')
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--data_dir', type=str, default='./data')
+    parser.add_argument('--model', type=str, default='efficientnet', choices=['efficientnet', 'resnet'])
+    parser.add_argument('--epochs', type=int, default=30)
+    parser.add_argument('--batch_size', type=int, default=32)
+    parser.add_argument('--lr', type=float, default=1e-4)
+    parser.add_argument('--patience', type=int, default=8)
+    parser.add_argument('--focal', action='store_true')
+    parser.add_argument('--no_balance', action='store_true')
+    parser.add_argument('--no_augment', action='store_true')
     
     args = parser.parse_args()
     run_experiment(args)
