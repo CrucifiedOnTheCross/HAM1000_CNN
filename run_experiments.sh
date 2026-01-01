@@ -11,7 +11,7 @@ echo "========================================================"
 
 # --- НАСТРОЙКИ ---
 EPOCHS=50        # Количество эпох
-BATCH_SIZE=64    # Размер батча
+BATCH_SIZE=128   # Размер батча
 PATIENCE=10      # Терпение EarlyStopping
 
 # ========================================================
@@ -19,17 +19,17 @@ PATIENCE=10      # Терпение EarlyStopping
 # Описание: Обычный дисбалансированный датасет, без аугментации.
 # Цель: Показать низкую чувствительность к редким классам и переобучение.
 # ========================================================
-echo ""
-echo "[1/3] ЗАПУСК: 1. Baseline (Imbalanced, No Augmentation, CrossEntropy)"
-python3 train_experiment.py \
-    --model efficientnet \
-    --no_balance \
-    --no_augment \
-    --epochs $EPOCHS \
-    --batch_size $BATCH_SIZE \
-    --patience $PATIENCE
+# echo ""
+# echo "[1/3] ЗАПУСК: 1. Baseline (Imbalanced, No Augmentation, CrossEntropy)"
+# python3 train_experiment.py \
+#     --model efficientnet \
+#     --no_balance \
+#     --no_augment \
+#     --epochs $EPOCHS \
+#     --batch_size $BATCH_SIZE \
+#     --patience $PATIENCE
 
-echo "СТАТУС: Этап 1 (Baseline) завершен."
+# echo "СТАТУС: Этап 1 (Baseline) завершен."
 
 # ========================================================
 # ЭТАП 2: ВЛИЯНИЕ АУГМЕНТАЦИИ
