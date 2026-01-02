@@ -25,13 +25,13 @@ echo "Эпох: $EPOCHS, Батч: $BATCH_SIZE"
 # # ========================================================
 # echo ""
 # echo "[1/3] ЗАПУСК: 1. Baseline (Imbalanced, No Augmentation)"
-# python3 train_experiment.py \
-#     --model $MODEL_NAME \
-#     --no_balance \
-#     --no_augment \
-#     --epochs $EPOCHS \
-#     --batch_size $BATCH_SIZE \
-#     --patience $PATIENCE
+python3 train_experiment.py \
+    --model $MODEL_NAME \
+    --no_balance \
+    --no_augment \
+    --epochs $EPOCHS \
+    --batch_size $BATCH_SIZE \
+    --patience $PATIENCE
 
 # echo "СТАТУС: Этап 1 завершен."
 
@@ -52,15 +52,15 @@ echo "Эпох: $EPOCHS, Батч: $BATCH_SIZE"
 # ========================================================
 # ЭТАП 3: ИТОГОВЫЙ МЕТОД (Proposed Method)
 # ========================================================
-echo ""
-echo "[3/3] ЗАПУСК: 3. Proposed Method (Balanced, Augmentation, Focal Loss)"
-python3 train_experiment.py \
-    --model $MODEL_NAME \
-    --epochs $EPOCHS \
-    --batch_size $BATCH_SIZE \
-    --patience $PATIENCE
+# echo ""
+# echo "[3/3] ЗАПУСК: 3. Proposed Method (Balanced, Augmentation, Focal Loss)"
+# python3 train_experiment.py \
+#     --model $MODEL_NAME \
+#     --epochs $EPOCHS \
+#     --batch_size $BATCH_SIZE \
+#     --patience $PATIENCE
     
-echo "СТАТУС: Этап 3 завершен."
+# echo "СТАТУС: Этап 3 завершен."
 
 echo ""
 echo "========================================================"

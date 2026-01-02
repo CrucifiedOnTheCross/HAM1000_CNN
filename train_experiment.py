@@ -168,6 +168,10 @@ def create_standard_generator(df: pd.DataFrame, input_shape: tuple, batch_size: 
 
 def run_experiment(args: argparse.Namespace) -> None:
     logger.info(f"START: {args.model.upper()} | Balance={not args.no_balance} | Aug={not args.no_augment} | Focal={args.focal}")
+    
+    # Логируем параметры Focal Loss, если он включен
+    if args.focal:
+        logger.info(f"Focal Params: Gamma={args.focal_gamma}, Alpha={args.focal_alpha}")
 
     # --- КОНФИГУРАЦИЯ ОБОРУДОВАНИЯ ---
     n_workers = multiprocessing.cpu_count()
@@ -233,13 +237,19 @@ def run_experiment(args: argparse.Namespace) -> None:
                 num_classes=7,
                 learning_rate=args.lr,
                 use_focal_loss=args.focal,
+                # Передаем параметры Focal Loss
+                focal_gamma=args.focal_gamma,
+                focal_alpha=args.focal_alpha,
                 use_augmentation=not args.no_augment
             )
         elif args.model == 'efficientnet':
             model = build_efficientnet_b0(
                 num_classes=7, 
                 learning_rate=args.lr, 
-                use_focal_loss=args.focal, 
+                use_focal_loss=args.focal,
+                # Передаем параметры Focal Loss
+                focal_gamma=args.focal_gamma,
+                focal_alpha=args.focal_alpha,
                 freeze_backbone=True,
                 use_augmentation=False 
             )
@@ -247,7 +257,10 @@ def run_experiment(args: argparse.Namespace) -> None:
             model = build_resnet50(
                 num_classes=7, 
                 learning_rate=args.lr, 
-                use_focal_loss=args.focal
+                use_focal_loss=args.focal,
+                # Передаем параметры Focal Loss
+                focal_gamma=args.focal_gamma,
+                focal_alpha=args.focal_alpha
             )
 
         warmup_epochs = 3
@@ -276,7 +289,10 @@ def run_experiment(args: argparse.Namespace) -> None:
             model = build_efficientnet_b0(
                 num_classes=7, 
                 learning_rate=args.lr / 10.0, 
-                use_focal_loss=args.focal, 
+                use_focal_loss=args.focal,
+                # Передаем параметры Focal Loss
+                focal_gamma=args.focal_gamma,
+                focal_alpha=args.focal_alpha,
                 freeze_backbone=False,
                 use_augmentation=False
             )
@@ -371,5 +387,10 @@ if __name__ == "__main__":
     parser.add_argument('--focal', action='store_true')
     parser.add_argument('--no_balance', action='store_true')
     parser.add_argument('--no_augment', action='store_true')
+    
+    # --- НОВЫЕ АРГУМЕНТЫ ДЛЯ FOCAL LOSS ---
+    parser.add_argument('--focal_gamma', type=float, default=2.0, help='Gamma parameter for Focal Loss')
+    parser.add_argument('--focal_alpha', type=float, default=0.25, help='Alpha parameter for Focal Loss')
+    
     args = parser.parse_args()
     run_experiment(args)
